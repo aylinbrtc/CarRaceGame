@@ -28,887 +28,118 @@ bin/
 ### Mac OS ###
 .DS_Store
 
-from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QScrollArea, QWidget, 
-                             QLabel, QComboBox, QLineEdit, QPushButton, QMessageBox, QGroupBox)
-from PyQt6.QtCore import Qt
-from datetime import datetime
-import json
-from widgets.ItemGenerators import ConnectorGenerator, BackshellGenerator
 
-class SmartAddItemWindow(QDialog):
-    def __init__(self, df, mode="element", parent=None, material_options=None):
-        super().__init__(parent)
-        self.df = df
-        self.mode = mode
-        self.material_options = material_options or {}
-        
-        # Başlık Ayarı
-        title = "Stok Girişi (Malzeme Ekle)" if mode == "material" else "Talep Oluştur (Tedarik Ekle)"
-        self.setWindowTitle(title)
-        self.resize(500, 850)
-        
-        self.generated_json = {}
-        self.is_successful = False
-        self.new_row_data = {}
-        self.fields = {} 
+# Eski utils importlarını kaldırın, yerine bunu ekleyin:
+from utils.FileOperations import FileOperations
+from utils.LoadingThread import FileLoaderThread # Thread dosyasını nereye koyduysanız
 
-        # --- ZORUNLU ALANLARI BELİRLE ---
-        # Eski kodunuzdaki mantığın aynısı
-        if self.mode == "material":
-            self.required_keys = [
-                "Malzeme Katalog Tanımı (TR)",
-                "Ölçü Birimi",
-                "Yerleşke",
-                "Parça No",
-                "Fiyat",
-                "Teslim Alma Tarihi",
-                "Teslim Alınan Miktar"
-            ]
-        else: # element (Tedarik)
-            self.required_keys = [
-                "Malzeme Katalog Tanımı (TR)"
-            ]
 
-        self.init_ui()
+def open_default_file(self, file_path):
+        if not file_path: return
 
-    def init_ui(self):
-        self.main_layout = QVBoxLayout(self)
-        self.main_layout.setSpacing(12)
-        self.main_layout.setContentsMargins(20, 20, 20, 20)
-
-        # --- 1. MALZEME TİPİ SEÇİMİ (Excel'deki "Malzeme Tipi" sütunu burasıdır) ---
-        lbl_main = QLabel("Malzeme Tipi:")
-        self.main_layout.addWidget(lbl_main)
+        # 1. Draft Kontrolü (Main Thread - Hızlı)
+        final_path_to_load = file_path
         
-        self.main_category_combo = QComboBox()
-        # Eski kodunuzdaki seçenekler + Kablaj hiyerarşisi
-        self.categories = ["Ekipman", "Sarf Malzeme", "Güç Ünitesi", "Kablaj", "Diğer"]
-        self.main_category_combo.addItems(self.categories)
-        self.main_category_combo.currentTextChanged.connect(self.on_main_category_changed)
-        
-        self.main_layout.addWidget(self.main_category_combo)
-
-        # --- 2. BİLEŞEN TÜRÜ (Sadece Kablaj için) ---
-        self.sub_cat_widget = QWidget()
-        self.sub_layout = QVBoxLayout(self.sub_cat_widget)
-        self.sub_layout.setContentsMargins(0, 0, 0, 0)
-        self.sub_layout.setSpacing(12)
-
-        lbl_sub = QLabel("Bileşen Türü:")
-        self.sub_layout.addWidget(lbl_sub)
-
-        self.sub_category_combo = QComboBox()
-        self.sub_category_combo.addItems(["Genel Kablo/Tel", "Konnektör", "Backshell"])
-        self.sub_category_combo.currentTextChanged.connect(self.on_sub_category_changed)
-        self.sub_layout.addWidget(self.sub_category_combo)
-        
-        self.main_layout.addWidget(self.sub_cat_widget)
-        
-        # --- 3. JENERATÖR ALANI (Teknik Özellikler) ---
-        self.generator_group = QGroupBox("Teknik Özellikler")
-        self.generator_group.setStyleSheet("""
-            QGroupBox {
-                margin-top: 20px;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-        """)
-        
-        self.gen_layout = QVBoxLayout(self.generator_group)
-        self.gen_layout.setSpacing(10)
-        self.gen_layout.setContentsMargins(10, 20, 10, 10)
-        
-        self.current_generator = None
-        self.main_layout.addWidget(self.generator_group)
-
-        # --- 4. EXCEL FORM ALANLARI ---
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        
-        form_widget = QWidget()
-        self.form_layout = QVBoxLayout(form_widget)
-        self.form_layout.setSpacing(10)
-        
-        self.create_excel_fields()
-        
-        scroll.setWidget(form_widget)
-        self.main_layout.addWidget(scroll)
-
-        # --- 5. BUTONLAR ---
-        btn_layout = QHBoxLayout()
-        btn_cancel = QPushButton("İptal")
-        btn_save = QPushButton("Kaydet")
-        
-        btn_cancel.setFixedHeight(30)
-        btn_save.setFixedHeight(30)
-        
-        btn_cancel.clicked.connect(self.reject)
-        btn_save.clicked.connect(self.save_data)
-        
-        btn_layout.addWidget(btn_cancel)
-        btn_layout.addWidget(btn_save)
-        self.main_layout.addLayout(btn_layout)
-
-        # Başlangıç Ayarı
-        self.on_main_category_changed(self.main_category_combo.currentText())
-
-    def create_excel_fields(self):
-        """
-        Eski AddItemWindow içindeki tüm alanları buraya ekliyoruz.
-        Malzeme Tipi yukarıda olduğu için hariç tutuldu.
-        """
-        headers = [
-            "Malzeme Katalog Tanımı (TR)",
-            "Tedarik Talep No", 
-            "Tedarik Talep Tarihi", 
-            "Tedarik Talebi",
-            "Sipariş Miktarı", 
-            "Ölçü Birimi", 
-            "Yerleşke", 
-            "Parça No",
-            "Fiyat", 
-            "Para Birimi", 
-            "Toplam Fiyat",
-            "Teslim Alma Tarihi", 
-            "Teslim Alınan Miktar", 
-            "Depo Miktarı", 
-            "Depo Konumu"
-        ]
-        
-        combo_cols = ["Ölçü Birimi", "Yerleşke", "Para Birimi"]
-
-        for h in headers:
-            # Zorunluluk Kontrolü (Görsel İşaretleme)
-            label_text = h
-            if h in self.required_keys:
-                label_text += " *"
-            
-            label = QLabel(label_text)
-            
-            if h in combo_cols:
-                field = QComboBox()
-                field.addItem("Seçiniz...")
-                if h in self.material_options:
-                    field.addItems(self.material_options[h])
+        if FileOperations.has_draft(file_path):
+            file_name = os.path.basename(file_path)
+            reply = QMessageBox.question(
+                self, "Taslak Bulundu",
+                f"'{file_name}' dosyası için kaydedilmemiş bir taslak var.\nTaslağı yüklemek ister misiniz?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                final_path_to_load = FileOperations.get_draft_path(file_path)
             else:
-                field = QLineEdit()
-                field.setPlaceholderText(h) # Placeholder ekledik
-                
-                if h == "Teslim Alma Tarihi":
-                    field.setText(datetime.now().strftime("%d.%m.%Y"))
+                FileOperations.delete_draft(file_path) # İstenmeyen taslağı temizle
 
-            self.form_layout.addWidget(label)
-            self.form_layout.addWidget(field)
-            self.fields[h] = field
+        # 2. Yükleme Başlat (Loading Göster)
+        self.setCursor(Qt.CursorShape.WaitCursor) # Mouse imleci dönsün
+        # self.statusBar().showMessage("Dosya yükleniyor, lütfen bekleyin...") 
 
-    def on_main_category_changed(self, text):
-        if text == "Kablaj":
-            self.sub_cat_widget.setVisible(True)
-            self.on_sub_category_changed(self.sub_category_combo.currentText())
-        else:
-            self.sub_cat_widget.setVisible(False)
-            self.clear_generator()
-            self.set_readonly_fields(False)
+        # Thread Başlatma
+        self.loader = FileLoaderThread(final_path_to_load)
+        # Thread bitince on_file_loaded çalışacak, orijinal path'i de gönderiyoruz ki kaydederken oraya kaydetsin
+        self.loader.loaded.connect(lambda df: self.on_file_loaded(df, file_path, final_path_to_load))
+        self.loader.error.connect(self.on_load_error)
+        self.loader.start()
 
-    def on_sub_category_changed(self, text):
-        self.clear_generator()
-        if text == "Konnektör":
-            self.set_generator(ConnectorGenerator())
-        elif text == "Backshell":
-            self.set_generator(BackshellGenerator())
-        else:
-            self.set_readonly_fields(False)
-
-    def clear_generator(self):
-        if self.current_generator:
-            self.gen_layout.removeWidget(self.current_generator)
-            self.current_generator.deleteLater()
-            self.current_generator = None
-        self.generator_group.setVisible(False)
-        self.generated_json = {}
-
-    def set_generator(self, generator):
-        self.current_generator = generator
-        self.gen_layout.addWidget(generator)
-        self.generator_group.setVisible(True)
-        generator.dataChanged.connect(self.on_generator_update)
-        self.set_readonly_fields(True)
-
-    def set_readonly_fields(self, is_readonly):
-        if "Malzeme Katalog Tanımı (TR)" in self.fields:
-            field = self.fields["Malzeme Katalog Tanımı (TR)"]
-            field.setReadOnly(is_readonly)
-            bg = "#f5f5f5" if is_readonly else "white"
-            field.setStyleSheet(f"background-color: {bg}; color: black;")
-            
-            if not is_readonly:
-                field.setPlaceholderText("Tanımı buraya giriniz...")
-            else:
-                field.setPlaceholderText("Otomatik oluşturuluyor...")
-
-    def on_generator_update(self, part_no, desc, json_data):
-        if "Malzeme Katalog Tanımı (TR)" in self.fields:
-            current_pn = ""
-            if "Parça No" in self.fields:
-                current_pn = self.fields["Parça No"].text()
-            
-            full_desc = desc
-            if current_pn:
-                full_desc += f", PN:{current_pn}"
-            
-            self.fields["Malzeme Katalog Tanımı (TR)"].setText(full_desc)
-            self.generated_json = json_data
-            self.generated_json["_base_description"] = desc
-
-    def save_data(self):
-        # 1. Jeneratör ve Parça No senkronizasyonu
-        if self.current_generator and "Parça No" in self.fields:
-             pn = self.fields["Parça No"].text()
-             base_desc = self.generated_json.get("_base_description", "")
-             if base_desc:
-                 self.fields["Malzeme Katalog Tanımı (TR)"].setText(f"{base_desc}, PN:{pn}")
-        
-        # 2. Zorunlu Alan Kontrolü (Validation)
-        for req_field in self.required_keys:
-            if req_field in self.fields:
-                widget = self.fields[req_field]
-                val = widget.currentText() if isinstance(widget, QComboBox) else widget.text()
-                
-                if not val or val == "Seçiniz...":
-                    QMessageBox.warning(self, "Eksik Bilgi", f"'{req_field}' alanı zorunludur.")
+    def select_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Dosya Seç", "", "Excel Dosyaları (*.xlsx *.xls)")
+        if file_path:
+            # Aynı dosya zaten açıksa uyarı ver (Mevcut mantığınız)
+            for existing in self.tab_contexts.values():
+                if existing['file_path'] == file_path:
+                    QMessageBox.warning(self, "Uyarı", "Bu dosya zaten açık.")
                     return
-
-        # 3. Veriyi Toplama
-        self.new_row_data = {}
-        
-        # A) Malzeme Tipi (En üstteki combobox'tan alıyoruz)
-        selected_type = self.main_category_combo.currentText()
-        if selected_type == "Kablaj": # Kablaj ise alt tipini de eklemek isteyebilirsiniz veya sadece "Kablaj"
-             # İsteğe bağlı: "Kablaj - Konnektör" gibi bir format için:
-             # selected_type = f"{selected_type} - {self.sub_category_combo.currentText()}"
-             pass
-        self.new_row_data["Malzeme Tipi"] = selected_type
-
-        # B) Form Alanları
-        for h, w in self.fields.items():
-            val = w.currentText() if isinstance(w, QComboBox) else w.text()
-            if val == "Seçiniz...": val = ""
-            self.new_row_data[h] = val
-        
-        # C) Ekstra Bilgiler
-        if "Durum" in self.df.columns:
-            self.new_row_data["Durum"] = "Depoda"
-
-        if self.generated_json and "Konnektör Detayları (JSON)" in self.df.columns:
-             self.new_row_data["Konnektör Detayları (JSON)"] = json.dumps(self.generated_json)
-             
-        # D) Duplicate Kontrolü
-        col_name = "Malzeme Katalog Tanımı (TR)"
-        if col_name in self.new_row_data and col_name in self.df.columns:
-            new_val = self.new_row_data[col_name]
-            if self.df[col_name].astype(str).eq(new_val).any():
-                QMessageBox.warning(self, "Uyarı", "Bu malzeme tanımı listede zaten mevcut.")
-                return
-
-        self.is_successful = True
-        self.accept()
-
-
-
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QLineEdit, QComboBox, QCheckBox, QGroupBox)
-from PyQt6.QtCore import pyqtSignal
-
-class BaseGenerator(QWidget):
-    """Tüm jeneratörlerin atası. Sinyal mekanizmasını tanımlar."""
-    # Sinyal: (Parça No, Açıklama, JSON Verisi) gönderir
-    dataChanged = pyqtSignal(str, str, dict) 
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(0, 0, 0, 0)
-
-class BackshellGenerator(BaseGenerator):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        
-        # 1. Backshell Tipi
-        self.type_combo = QComboBox()
-        self.type_combo.addItems(["D-SUB", "MICRO D-SUB"])
-        self.type_combo.currentIndexChanged.connect(self.load_headers)
-        
-        self.layout.addWidget(QLabel("Backshell Tipi:"))
-        self.layout.addWidget(self.type_combo)
-
-        # 2. Dinamik Alanlar için Yer Tutucu
-        self.dynamic_layout = QVBoxLayout()
-        self.layout.addLayout(self.dynamic_layout)
-        
-        self.combo_boxes = {}
-        
-        # İlk yükleme
-        self.load_headers()
-
-    def load_headers(self):
-        # Temizlik
-        while self.dynamic_layout.count():
-            item = self.dynamic_layout.takeAt(0)
-            widget = item.widget()
-            if widget: widget.deleteLater()
-        self.combo_boxes = {}
-
-        bs_type = self.type_combo.currentText()
-        headers = {}
-
-        # SENİN MANTIĞIN
-        if bs_type == "D-SUB":
-            headers = {
-                "Pin Sayısı": ["SD:9 HD:15", "SD:15 HD:26", "SD:25 HD:44", "SD:37 HD:62", "SD:50 HD:78", "104 PİN"],
-                "Backshell Malzemesi": ["METAL", "METALIZED"]
-            }
-        elif bs_type == "MICRO D-SUB":
-            headers = {
-                "Pin Sayısı": ["9 PIN", "15 PIN", "21 PIN", "25 PIN", "31 PIN", "37 PIN", "51 PIN", "100 PIN"]
-            }
-
-        # Arayüzü Oluştur
-        for key, items in headers.items():
-            lbl = QLabel(f"{key}:")
-            combo = QComboBox()
-            combo.addItems(items)
-            combo.currentIndexChanged.connect(self.emit_data)
             
-            self.dynamic_layout.addWidget(lbl)
-            self.dynamic_layout.addWidget(combo)
-            self.combo_boxes[key] = combo
-            
-        self.emit_data()
-
-    def emit_data(self):
-        bs_type = self.type_combo.currentText()
-        
-        # Tanım Oluşturma
-        parts = ["BACKSHELL", bs_type]
-        json_data = {"Türü": bs_type}
-        
-        for key, combo in self.combo_boxes.items():
-            val = combo.currentText()
-            parts.append(val)
-            json_data[key] = val
-            
-        description = ", ".join(parts)
-        
-        # Backshell'de parça no formülü yoksa boş gönderiyoruz, kullanıcı ana ekranda girecek
-        part_no = "" 
-        
-        self.dataChanged.emit(part_no, description, json_data)
-
-
-class ConnectorGenerator(BaseGenerator):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        
-        # 1. Konnektör Tipi
-        self.type_combo = QComboBox()
-        self.type_combo.addItems(["RF", "D-SUB", "MICRO D-SUB"])
-        self.type_combo.currentIndexChanged.connect(self.load_headers)
-        
-        self.layout.addWidget(QLabel("Konnektör Tipi:"))
-        self.layout.addWidget(self.type_combo)
-
-        # 2. Checkboxlar (Kit / Solder)
-        self.checks_layout = QHBoxLayout()
-        self.chk_kit = QCheckBox("KIT")
-        self.chk_solder = QCheckBox("SOLDER")
-        self.chk_kit.stateChanged.connect(self.emit_data)
-        self.chk_solder.stateChanged.connect(self.emit_data)
-        self.checks_layout.addWidget(self.chk_kit)
-        self.checks_layout.addWidget(self.chk_solder)
-        self.layout.addLayout(self.checks_layout)
-
-        # 3. Dinamik Alanlar
-        self.dynamic_layout = QVBoxLayout()
-        self.layout.addLayout(self.dynamic_layout)
-        self.combo_boxes = {}
-        
-        self.load_headers()
-
-    def load_headers(self):
-        # Temizlik
-        while self.dynamic_layout.count():
-            item = self.dynamic_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-        self.combo_boxes = {}
-
-        c_type = self.type_combo.currentText()
-        
-        # Checkbox görünürlük ayarı (Senin kodundaki mantık)
-        if c_type == "RF":
-            self.chk_kit.hide()
-            self.chk_solder.hide()
-        else:
-            self.chk_kit.show()
-            self.chk_solder.show()
-
-        headers = {}
-        # SENİN MANTIĞIN
-        if c_type == "RF":
-            headers = {
-                "Konnektör Tipi": ["BNC", "SMA", "SMB"],
-                "Cinsiyet": ["ERKEK", "DİŞİ"],
-                "Kablo Uyumluluğu": ["TWINAX KABLO UYUMLU", "KOAKSİYEL KABLO UYUMLU", ""]
-            }
-        elif c_type == "MICRO D-SUB":
-            headers = {
-                "Cinsiyet": ["ERKEK", "DİŞİ"],
-                "Pin Sayısı": ["9 PIN", "15 PIN", "21 PIN", "25 PIN", "31 PIN", "37 PIN", "44 PIN", "50 PIN"]
-            }
-        elif c_type == "D-SUB":
-            headers = {
-                "Yoğunluk": ["YÜKSEK YOĞUNLUKLU", "STANDART YOĞUNLUKLU"],
-                "Cinsiyet": ["ERKEK", "DİŞİ"],
-                "Pin Sayısı": ["9 PIN", "15 PIN", "25 PIN", "26 PIN", "37 PIN", "44 PIN", "50 PIN"]
-            }
-
-        for key, items in headers.items():
-            lbl = QLabel(f"{key}:")
-            combo = QComboBox()
-            combo.addItems(items)
-            combo.currentIndexChanged.connect(self.emit_data)
-            
-            self.dynamic_layout.addWidget(lbl)
-            self.dynamic_layout.addWidget(combo)
-            self.combo_boxes[key] = combo
-            
-        self.emit_data()
-
-    def emit_data(self):
-        c_type = self.type_combo.currentText()
-        parts = ["KONNEKTÖR", c_type]
-        json_data = {"Türü": c_type}
-        
-        for key, combo in self.combo_boxes.items():
-            val = combo.currentText()
-            if val:
-                parts.append(val)
-                json_data[key] = val
-                
-        if self.chk_kit.isChecked() and not self.chk_kit.isHidden():
-            parts.append("KIT")
-            json_data["KIT"] = True
-            
-        if self.chk_solder.isChecked() and not self.chk_solder.isHidden():
-            parts.append("SOLDER")
-            json_data["SOLDER"] = True
-            
-        description = ", ".join(parts)
-        part_no = "" 
-        
-        self.dataChanged.emit(part_no, description, json_data)
-
-
-
--------------------------------------------------
-
-def open_add_item_window(self, df, mode="element"):
-        # Seçenekleri yükle
-        material_options = {}
-        if self.json_data:
-            path = self.get_file_path("options_config_filepath")
-            material_options = self.load_json_data(path)
-
-        # Yeni Pencereyi Aç
-        dialog = SmartAddItemWindow(df, mode=mode, parent=self, material_options=material_options)
-        dialog.exec()
-
-        if dialog.is_successful:
-            temp_df = df.copy()
-            
-            # Yeni satır ekleme mantığı
-            new_row = pd.Series([""] * len(df.columns), index=df.columns)
-            for col, val in dialog.new_row_data.items():
-                if col in new_row.index:
-                    new_row[col] = str(val)
-            
-            df.loc[len(df)] = new_row
-            
-            self.apply_changes(temp_df, change_type="Ekle")
-
--------------------------------------------------------------
-
-from PyQt6.QtCore import QSortFilterProxyModel, Qt, QModelIndex
-import json
-
-class FilterProxyModel(QSortFilterProxyModel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.column_filter_data = None # Gösterilecek sütun başlıklarının listesi
-        self.category_filter = None
-        self.search_query = ""
-        self.status_column_index = -1 
-        self.json_column_name = "Konnektör Detayları (JSON)"
-        
-        # YENİ: Hangi sütunda arama yapılacağını tutan değişken (-1 = Tümü)
-        self.search_column_index = -1 
-
-    def setColumnFilter(self, column_names):
-        """ Görüntülenecek sütun başlıklarını ayarlar. """
-        self.beginResetModel()
-        self.column_filter_data = column_names
-        self.endResetModel()
-
-    def setCategoryFilter(self, category):
-        """ Kategoriye göre filtreleme için kuralı ayarlar. """
-        self.beginResetModel()
-        self.category_filter = category
-        self.invalidateFilter()
-        self.endResetModel()
-
-    def setSearchQuery(self, query):
-        """ Arama sorgusunu ayarlar. """
-        self.beginResetModel() # Reset model, arama sonuçlarını anında yansıtır
-        self.search_query = query
-        self.invalidateFilter()
-        self.endResetModel()
-
-    # YENİ: MainWindow'dan gelen sütun indeksini kaydeder
-    def setFilterKeyColumn(self, column):
-        """ 
-        Aramanın yapılacağı sütun indeksini ayarlar. 
-        -1 ise tüm sütunlarda arama yapılır.
-        """
-        self.search_column_index = column
-        self.invalidateFilter()
-
-    def setSourceModel(self, sourceModel):
-        super().setSourceModel(sourceModel)
-        if sourceModel is not None:
-            # Durum sütununun gerçek (source) indeksini bul
-            for i in range(sourceModel.columnCount()):
-                header_data = sourceModel.headerData(i, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
-                if header_data == "Durum":
-                    self.status_column_index = i
-                    break
-        self.invalidateFilter()
-
-    def columnCount(self, parent=QModelIndex()):
-        if self.column_filter_data is None:
-            return super().columnCount(parent)
-        return len(self.column_filter_data)
-
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            if self.column_filter_data and section < len(self.column_filter_data):
-                return self.column_filter_data[section]
-        return super().headerData(section, orientation, role)
-    
-    def normalize_for_search(self, text):
-        if not isinstance(text, str):
-            text = str(text)
-        # Basit normalizasyon (Performans için karmaşık map yerine replace zinciri)
-        text = text.replace('ç', 'c').replace('Ç', 'C')
-        text = text.replace('ğ', 'g').replace('Ğ', 'G')
-        text = text.replace('ı', 'i').replace('İ', 'I')
-        text = text.replace('ö', 'o').replace('Ö', 'O')
-        text = text.replace('ş', 's').replace('Ş', 'S')
-        text = text.replace('ü', 'u').replace('Ü', 'U')
-        return text.lower()
-
-    # --- Mapping ---
-    
-    def mapFromSource(self, sourceIndex):
-        if not sourceIndex.isValid() or self.column_filter_data is None:
-            return super().mapFromSource(sourceIndex)
-
-        source_model = self.sourceModel()
-        source_column_name = source_model.headerData(sourceIndex.column(), Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
-        
-        try:
-            proxy_column = self.column_filter_data.index(source_column_name)
-            return self.createIndex(sourceIndex.row(), proxy_column)
-        except ValueError:
-            return QModelIndex()
-
-    def mapToSource(self, proxyIndex):
-        if not proxyIndex.isValid() or self.column_filter_data is None:
-            return super().mapToSource(proxyIndex)
-        
-        col_name = self.column_filter_data[proxyIndex.column()]
-        sourceModel = self.sourceModel()
-        
-        if col_name in sourceModel.df.columns:
-            source_col = sourceModel.df.columns.get_loc(col_name)
-            proxy_row_ref = self.index(proxyIndex.row(), 0)
-            source_row_index = super().mapToSource(proxy_row_ref)
-            
-            if source_row_index.isValid():
-                return sourceModel.index(source_row_index.row(), source_col)
-        
-        return QModelIndex()
-    
-    def getOriginalRow(self, proxyRow):
-        try:
-            sourceIndex = self.mapToSource(self.index(proxyRow, 0))
-            return sourceIndex.row() if sourceIndex.isValid() else -1
-        except Exception:
-            return -1
-
-    # --- FİLTRELEME MANTIĞI (GÜNCELLENDİ) ---
-    def filterAcceptsRow(self, source_row, source_parent):
-        sourceModel = self.sourceModel()
-        if sourceModel is None: return True
-        
-        df = sourceModel.df 
-
-        # 1. Konnektör/Kategori Filtresi (Önceki mantık aynen duruyor)
-        if self.category_filter == "Konnektörler":
-            if self.json_column_name in df.columns:
-                raw_val = df.iloc[source_row].get(self.json_column_name, "")
-                val_str = str(raw_val).strip().lower()
-                if not (val_str and val_str != 'nan' and val_str != '{}'):
-                    return False
-            else:
-                return False
-
-        elif self.status_column_index != -1 and self.category_filter:
-            status_val = df.iloc[source_row, self.status_column_index]
-            if self.category_filter == "Demirbaş Listesi" and status_val != "Kullanımda":
-                return False
-            elif (self.category_filter == "Depo" or self.category_filter == "Backshelller") and status_val != "Depoda":
-                return False
-
-        # 2. Arama Filtresi (Eğer boşsa geç)
-        if not self.search_query:
-            return True
-
-        normalized_query = self.normalize_for_search(self.search_query)
-
-        # -----------------------------------------------------------
-        # YENİ: KOMBOKUTUSUNA GÖRE ARAMA
-        # -----------------------------------------------------------
-        
-        # A) Eğer belirli bir sütun seçiliyse (search_column_index != -1)
-        if self.search_column_index != -1 and self.column_filter_data:
-            # Seçilen sütunun adını bul (Örn: "Parça No" veya JSON'daki "shell_size")
-            if self.search_column_index >= len(self.column_filter_data):
-                return False # Hata durumu
-                
-            target_col_name = self.column_filter_data[self.search_column_index]
-            cell_value = ""
-
-            # Senaryo 1: Gerçek Excel sütunu
-            if target_col_name in df.columns:
-                val = df.iloc[source_row].get(target_col_name, "")
-                cell_value = str(val)
-            
-            # Senaryo 2: Sanal (JSON) sütun
-            elif self.json_column_name in df.columns:
-                try:
-                    json_raw = df.iloc[source_row].get(self.json_column_name, "")
-                    if str(json_raw).strip() and str(json_raw) != 'nan':
-                        data_dict = json.loads(str(json_raw))
-                        if isinstance(data_dict, dict):
-                            cell_value = str(data_dict.get(target_col_name, ""))
-                except:
-                    pass
-            
-            # Sadece bu hücrede ara
-            if normalized_query in self.normalize_for_search(cell_value):
-                return True
-            else:
-                return False
-
-        # B) Eğer "Tümü" seçiliyse (search_column_index == -1) -> Eski Mantık
-        else:
-            row_data = df.iloc[source_row].astype(str).values
-            for cell_value in row_data:
-                if normalized_query in self.normalize_for_search(cell_value):
-                    return True
-            
-            # JSON içeriğinde de aramak isterseniz buraya ekleyebilirsiniz,
-            # ama genellikle tüm satır string araması yeterlidir.
-
-        return False
-
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid(): return None
-
-        if role == Qt.ItemDataRole.DisplayRole:
-            col_name = self.column_filter_data[index.column()]
-
-            if col_name == "İşlemler": return ""
-
-            sourceModel = self.sourceModel()
-            if not sourceModel: return None    
-            df = sourceModel.df
-
-            # Satır indeksini bulmak için mapToSource hilesi
-            proxy_row_ref = self.index(index.row(), 0)
-            source_index = super().mapToSource(proxy_row_ref)
-            
-            if not source_index.isValid(): return None
-            row_idx = source_index.row()
-
-            # Gerçek sütun mu?
-            if col_name in df.columns:
-                val = df.iloc[row_idx].get(col_name, "")
-                return str(val) if val is not None else ""
-
-            # JSON sütunu mu?
-            elif self.json_column_name in df.columns:
-                json_raw = df.iloc[row_idx].get(self.json_column_name, "")
-                json_str = str(json_raw).strip()
-                
-                if not json_str or json_str.lower() == 'nan': return ""
-
-                try:
-                    data_dict = json.loads(json_str)
-                    if isinstance(data_dict, dict):
-                        val = data_dict.get(col_name, "")
-                        return str(val) if val is not None else ""
-                except:
-                    return ""
-            
-            return ""
-
-        return super().data(index, role)
-
-
-
-------------------------------------------------
-
-    def update_row_filters(self):
-        """
-        Arama çubuğundaki metne ve seçili sütuna göre filtreleme yapar.
-        """
-        current_tab = self.tab_widget.tabText(self.tab_widget.currentIndex())
-        context = self.tab_contexts.get(current_tab)
-
-        if not context:
-            return
-            
-        proxy_model = context['proxy_model']
-        search_bar = context['search']
-        filter_combo = context['filter_combo']
-
-        search_text = search_bar.text()
-        selected_column_name = filter_combo.currentText()
-        
-        # 1. Sütun İndeksini Bul
-        column_index = -1 # -1 Tümü demektir (QSortFilterProxyModel standardı)
-        
-        if selected_column_name and selected_column_name != "Tümü":
-            # Şu anki görünür başlıklar arasında seçilen ismin kaçıncı sırada olduğunu bul
-            # context["headers"] listesi on_category_changed içinde güncellenmişti
-            current_headers = context.get("headers", [])
-            
-            if selected_column_name in current_headers:
-                column_index = current_headers.index(selected_column_name)
-        
-        # 2. Proxy Model'e Ayarları Gönder
-        # Eğer FilterProxyModel sınıfınız QSortFilterProxyModel'den miras alıyorsa:
-        proxy_model.setFilterKeyColumn(column_index) 
-        
-        # Sizin özel search fonksiyonunuz:
-        proxy_model.setSearchQuery(search_text)
+            # Yukarıdaki yeni mantığı kullanması için buraya yönlendiriyoruz
+            self.open_default_file(file_path)
 
 
 
 
+def on_file_loaded(self, df, original_path, loaded_path):
+        """Thread veri yüklemeyi bitirdiğinde çağrılır."""
+        self.setCursor(Qt.CursorShape.ArrowCursor) # İmleci düzelt
+        # self.statusBar().showMessage("Yükleme tamamlandı.", 3000)
 
-def on_category_changed(self, selected_category, do_not_update=False):
-        current_tab_index = self.tab_widget.currentIndex()
-        current_file_name = self.tab_widget.tabText(current_tab_index)
-        tab_context = self.tab_contexts.get(current_file_name)
-
-        if not tab_context:
+        if df is None:
+            QMessageBox.critical(self, "Hata", "Dosya okunamadı veya veri boş.")
             return
 
-        proxy_model = tab_context['proxy_model']
-        df = tab_context['df']
+        file_name = os.path.basename(original_path)
         
-        # Varsayılan başlıkları JSON config'den al
-        if self.json_data and selected_category in self.json_data:
-            base_headers = list(self.json_data[selected_category])
-        else:
-            base_headers = df.columns.tolist()
+        # Eğer taslak yüklediysek kullanıcı bilsin
+        is_draft = (original_path != loaded_path)
+        
+        # Temizlik döngülerine gerek yok, df tertemiz geldi. Direkt init_content'e ver.
+        self.init_content(file_name, df, original_path)
+        
+        if is_draft:
+            self.tab_widget.setTabText(self.tab_widget.currentIndex(), f"{file_name} * (Taslak)")
+            QMessageBox.information(self, "Bilgi", "Kaydedilmemiş taslak yüklendi.")
 
-        final_headers = []
 
-        if selected_category == "Konnektörler":
-            json_col_name = "Konnektör Detayları (JSON)"
-            
-            # Tüm satırlardaki JSON verilerini tarayıp benzersiz anahtarları bul
-            all_json_keys = set()
-            if json_col_name in df.columns:
-                for json_string in df[json_col_name].dropna():
-                    if json_string and str(json_string).lower() != 'nan':
-                        try:
-                            json_data = json.loads(str(json_string))
-                            all_json_keys.update(json_data.keys())
-                        except json.JSONDecodeError:
-                            pass
-            
-            sorted_json_keys = sorted(list(all_json_keys))
-            
-            # Başlık sırasını belirle: [Sabit Başlıklar] + [JSON Keyleri] + [Diğerleri...]
-            # Örneğin "Malzeme Katalog Tanımı (TR)" en başa, sonra JSON verileri gelsin.
-            
-            priority_headers = ["Malzeme Katalog Tanımı (TR)"]
-            end_headers = ["Parça No", "Depo Miktarı", "Depo Konumu", "Durum", "İşlemler"]
-            
-            # Priority headers listeye ekle
-            for h in priority_headers:
-                if h in df.columns or h in base_headers:
-                    final_headers.append(h)
-            
-            # JSON keylerini ekle (Sanal Sütunlar)
-            final_headers.extend(sorted_json_keys)
-            
-            # Sonda görünmesini istediklerini ekle (eğer base_headers içindeyse)
-            for h in base_headers:
-                if h not in final_headers and h not in end_headers:
-                     # config dosyasında tanımlı ama priority veya json değilse ekle
-                    final_headers.append(h)
 
-            for h in end_headers:
-                 # Config dosyasında varsa ve henüz eklenmediyse ekle
-                 if h in base_headers and h not in final_headers:
-                     final_headers.append(h)
-                     
-            if "İşlemler" not in final_headers:
-                final_headers.append("İşlemler")
+def on_load_error(self, error_msg):
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        QMessageBox.critical(self, "Dosya Açma Hatası", f"Beklenmedik bir hata oluştu:\n{error_msg}")
 
-        else:
-            # Diğer kategoriler için standart davranış
-            final_headers = base_headers + ["İşlemler"]
 
-        # Proxy model'e yeni sütun listesini ve kategoriyi bildir
-        tab_context["headers"] = final_headers.copy()
-        proxy_model.setColumnFilter(final_headers)
-        proxy_model.setCategoryFilter(selected_category)
-
-        filter_combo = tab_context.get('filter_combo')
-        if filter_combo:
-            filter_combo.blockSignals(True) # Gereksiz tetiklemeyi önle
-            filter_combo.clear()
-            filter_combo.addItem("Tümü") # Her zaman tümünde arama seçeneği olsun
+def save_current_file(self):
+        current_idx = self.tab_widget.currentIndex()
+        if current_idx == -1: return
+        
+        tab_name = self.tab_widget.tabText(current_idx)
+        # Eğer sekme isminde " * (Taslak)" gibi ekler varsa temizle
+        real_tab_name = tab_name.replace(" * (Taslak)", "").strip()
+        
+        context = self.tab_contexts.get(real_tab_name) # Key'i doğru bulduğuna emin ol
+        # Eğer bulamazsa context'i tab_widget.currentWidget() üzerinden bulmayı dene
+        
+        if context:
+            df = context['df']
+            file_path = context['file_path']
             
-            # "İşlemler" sütununda arama yapmak mantıksız olduğu için onu hariç tutabiliriz
-            searchable_headers = [h for h in final_headers if h != "İşlemler"]
-            filter_combo.addItems(searchable_headers)
+            # --- YENİ KAYIT MANTIĞI ---
+            success = FileOperations.save_file(df, file_path, is_draft=False)
             
-            filter_combo.blockSignals(False)
-            filter_combo.setCurrentIndex(0) # Varsayılan olarak "Tümü" seçilsin
-        # ==========================================================
+            if success:
+                # Başarılıysa taslağı sil
+                FileOperations.delete_draft(file_path)
+                context['last_saved_df'] = df.copy()
+                
+                # Loglama işlemleriniz (Aynen kalabilir)
+                # ...
+                
+                QMessageBox.information(self, "Başarılı", "Dosya kaydedildi.")
+                # Sekme adını düzelt (Yıldız varsa sil)
+                self.tab_widget.setTabText(current_idx, real_tab_name)
+            else:
+                QMessageBox.critical(self, "Hata", "Dosya kaydedilemedi!")
 
-        if not do_not_update:
-            self.update_row_filters()
-        self.refresh_action_delegate()
+
+
+open_file_with_draft_check(self, file_path) -> SİL
+get_draft_filepath(self, original_filepath) -> SİL
+save_to_excel(self) 
