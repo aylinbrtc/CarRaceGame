@@ -143,3 +143,266 @@ def save_current_file(self):
 open_file_with_draft_check(self, file_path) -> SİL
 get_draft_filepath(self, original_filepath) -> SİL
 save_to_excel(self) 
+
+
+
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+                             QLineEdit, QComboBox, QCheckBox, QGroupBox)
+from PyQt6.QtCore import pyqtSignal
+
+class BaseGenerator(QWidget):
+    dataChanged = pyqtSignal(str, str, dict) 
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(10)
+
+class BackshellGenerator(BaseGenerator):
+    # ... (Backshell kodları aynen kalacak, önceki cevaptaki gibi) ...
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["D-SUB", "MICRO D-SUB"])
+        self.type_combo.currentIndexChanged.connect(self.load_headers)
+        
+        self.layout.addWidget(QLabel("Backshell Tipi:"))
+        self.layout.addWidget(self.type_combo)
+
+        self.dynamic_layout = QVBoxLayout()
+        self.layout.addLayout(self.dynamic_layout)
+        
+        self.combo_boxes = {}
+        self.load_headers()
+
+    def load_headers(self):
+        while self.dynamic_layout.count():
+            item = self.dynamic_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        self.combo_boxes = {}
+
+        bs_type = self.type_combo.currentText()
+        headers = {}
+
+        if bs_type == "D-SUB":
+            headers = {
+                "Pin Sayısı": ["SD:9 HD:15", "SD:15 HD:26", "SD:25 HD:44", "SD:37 HD:62", "SD:50 HD:78", "104 PİN"],
+                "Backshell Malzemesi": ["METAL", "METALIZED"]
+            }
+        elif bs_type == "MICRO D-SUB":
+            headers = {
+                "Pin Sayısı": ["9 PIN", "15 PIN", "21 PIN", "25 PIN", "31 PIN", "37 PIN", "51 PIN", "100 PIN"]
+            }
+
+        for key, items in headers.items():
+            lbl = QLabel(f"{key}:")
+            combo = QComboBox()
+            combo.setEditable(True)
+            combo.addItems(items)
+            combo.currentTextChanged.connect(self.emit_data)
+            
+            self.dynamic_layout.addWidget(lbl)
+            self.dynamic_layout.addWidget(combo)
+            self.combo_boxes[key] = combo
+            
+        self.emit_data()
+
+    def emit_data(self):
+        bs_type = self.type_combo.currentText()
+        parts = ["BACKSHELL", bs_type]
+        json_data = {"Türü": bs_type}
+        
+        for key, combo in self.combo_boxes.items():
+            val = combo.currentText().strip()
+            parts.append(val)
+            json_data[key] = val
+            
+        description = ", ".join(parts)
+        self.dataChanged.emit("", description, json_data)
+
+
+class ConnectorGenerator(BaseGenerator):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # TABLO VERİLERİ (Görselden alındı)
+        self.dsub_data = {
+            "Normal Yoğunluk (Standart)": [
+                "9 Pin (DE-9)", 
+                "15 Pin (DA-15)", 
+                "25 Pin (DB-25)", 
+                "37 Pin (DC-37)", 
+                "50 Pin (DD-50)"
+            ],
+            "Yüksek Yoğunluk (High Density)": [
+                "15 Pin (DE-15)", 
+                "26 Pin (DA-26)", 
+                "44 Pin (DB-44)", 
+                "62 Pin (DC-62)", 
+                "78 Pin (DD-78)", 
+                "104 Pin"
+            ],
+            "Çift Yoğunluk (Double Density)": [
+                "19 Pin (DE-19)", 
+                "31 Pin (DA-31)", 
+                "52 Pin (DB-52)", 
+                "79 Pin (DC-79)", 
+                "100 Pin (DD-100)"
+            ]
+        }
+
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["RF", "D-SUB", "MICRO D-SUB"])
+        self.type_combo.currentIndexChanged.connect(self.load_headers)
+        
+        self.layout.addWidget(QLabel("Konnektör Tipi:"))
+        self.layout.addWidget(self.type_combo)
+
+        # Checkboxlar
+        self.checks_layout = QHBoxLayout()
+        self.chk_kit = QCheckBox("KIT")
+        self.chk_solder = QCheckBox("SOLDER")
+        self.chk_kit.stateChanged.connect(self.emit_data)
+        self.chk_solder.stateChanged.connect(self.emit_data)
+        self.checks_layout.addWidget(self.chk_kit)
+        self.checks_layout.addWidget(self.chk_solder)
+        self.layout.addLayout(self.checks_layout)
+
+        # Dinamik Alanlar
+        self.dynamic_layout = QVBoxLayout()
+        self.layout.addLayout(self.dynamic_layout)
+        self.combo_boxes = {}
+        
+        # Referansları tutmak için (D-SUB mantığı için gerekli)
+        self.dsub_density_combo = None
+        self.dsub_pin_combo = None
+
+        self.load_headers()
+
+    def load_headers(self):
+        # Temizlik
+        while self.dynamic_layout.count():
+            item = self.dynamic_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        self.combo_boxes = {}
+        self.dsub_density_combo = None
+        self.dsub_pin_combo = None
+
+        c_type = self.type_combo.currentText()
+        
+        # Checkbox Görünürlüğü
+        if c_type == "RF":
+            self.chk_kit.hide()
+            self.chk_solder.hide()
+        else:
+            self.chk_kit.show()
+            self.chk_solder.show()
+
+        # --- D-SUB ÖZEL MANTIĞI ---
+        if c_type == "D-SUB":
+            self.setup_dsub_ui()
+            return # D-SUB için özel fonksiyonu çalıştır ve çık
+
+        # --- DİĞER TİPLER (RF, MICRO D-SUB) ---
+        headers = {}
+        if c_type == "RF":
+            headers = {
+                "Konnektör Tipi": ["BNC", "SMA", "SMB", "TNC", "N-TYPE"],
+                "Cinsiyet": ["ERKEK", "DİŞİ"],
+                "Kablo Uyumluluğu": ["TWINAX KABLO UYUMLU", "KOAKSİYEL KABLO UYUMLU"]
+            }
+        elif c_type == "MICRO D-SUB":
+            headers = {
+                "Cinsiyet": ["ERKEK", "DİŞİ"],
+                "Pin Sayısı": ["9 PIN", "15 PIN", "21 PIN", "25 PIN", "31 PIN", "37 PIN", "51 PIN", "100 PIN"]
+            }
+
+        for key, items in headers.items():
+            self.add_dynamic_field(key, items)
+            
+        self.emit_data()
+
+    def setup_dsub_ui(self):
+        """Görseldeki tabloya göre D-SUB arayüzünü kurar."""
+        
+        # 1. Cinsiyet (Ortak)
+        self.add_dynamic_field("Cinsiyet", ["ERKEK", "DİŞİ"])
+
+        # 2. Yoğunluk Seçimi (Density)
+        lbl_density = QLabel("Yoğunluk:")
+        self.dsub_density_combo = QComboBox()
+        self.dsub_density_combo.setEditable(True)
+        # Tablodaki 3 ana başlık
+        self.dsub_density_combo.addItems(list(self.dsub_data.keys()))
+        
+        self.dynamic_layout.addWidget(lbl_density)
+        self.dynamic_layout.addWidget(self.dsub_density_combo)
+        self.combo_boxes["Yoğunluk"] = self.dsub_density_combo
+
+        # 3. Pin Sayısı (Yoğunluğa göre değişecek)
+        lbl_pin = QLabel("Pin Sayısı / Gövde:")
+        self.dsub_pin_combo = QComboBox()
+        self.dsub_pin_combo.setEditable(True)
+        
+        self.dynamic_layout.addWidget(lbl_pin)
+        self.dynamic_layout.addWidget(self.dsub_pin_combo)
+        self.combo_boxes["Pin Sayısı"] = self.dsub_pin_combo
+
+        # Sinyalleri Bağla
+        # Yoğunluk değişince -> Pinleri güncelle
+        self.dsub_density_combo.currentTextChanged.connect(self.update_dsub_pins)
+        # Pin değişince -> Veriyi kaydet
+        self.dsub_pin_combo.currentTextChanged.connect(self.emit_data)
+        self.dsub_density_combo.currentTextChanged.connect(self.emit_data)
+
+        # İlk Açılış: İlk yoğunluğun pinlerini yükle
+        self.update_dsub_pins(self.dsub_density_combo.currentText())
+
+    def update_dsub_pins(self, density_text):
+        """Seçilen yoğunluğa göre pin listesini günceller."""
+        if not self.dsub_pin_combo: return
+
+        self.dsub_pin_combo.blockSignals(True) # Gereksiz tetiklemeyi önle
+        self.dsub_pin_combo.clear()
+        
+        # Eğer elle yazılan bir yoğunluksa ve listede yoksa boş gelir
+        pins = self.dsub_data.get(density_text, [])
+        self.dsub_pin_combo.addItems(pins)
+        
+        self.dsub_pin_combo.blockSignals(False)
+        self.emit_data() # Güncelleme bitince veriyi yay
+
+    def add_dynamic_field(self, label_text, items):
+        lbl = QLabel(f"{label_text}:")
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItems(items)
+        combo.currentTextChanged.connect(self.emit_data)
+        
+        self.dynamic_layout.addWidget(lbl)
+        self.dynamic_layout.addWidget(combo)
+        self.combo_boxes[label_text] = combo
+
+    def emit_data(self):
+        c_type = self.type_combo.currentText()
+        parts = ["KONNEKTÖR", c_type]
+        json_data = {"Türü": c_type}
+        
+        for key, combo in self.combo_boxes.items():
+            val = combo.currentText().strip()
+            if val:
+                parts.append(val)
+                json_data[key] = val
+                
+        if self.chk_kit.isChecked() and not self.chk_kit.isHidden():
+            parts.append("KIT")
+            json_data["KIT"] = True
+            
+        if self.chk_solder.isChecked() and not self.chk_solder.isHidden():
+            parts.append("SOLDER")
+            json_data["SOLDER"] = True
+            
+        description = ", ".join(parts)
+        self.dataChanged.emit("", description, json_data)
